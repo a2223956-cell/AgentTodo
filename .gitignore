@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 数据与运行时产物
+*.log
+*.tmp
+
+# 系统
+Thumbs.db
+.DS_Store
