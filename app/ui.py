@@ -6,6 +6,7 @@ import tkinter as tk
 
 from . import theme as T
 from .theme import rounded_rect
+from .tooltip import Tooltip
 
 try:
     from tkinterdnd2 import COPY, DND_FILES
@@ -107,6 +108,10 @@ class TaskRow(tk.Frame):
         self.del_btn.grid(row=0, column=3, rowspan=2, padx=(2, 8))
         self.del_btn.bind("<Button-1>", lambda e: cb["delete"](task.id))
 
+        Tooltip(self.check, "点击切换完成 / 未完成")
+        Tooltip(self.prog, "左键 +25% 进度;右键 -25%")
+        Tooltip(self.del_btn, "删除此任务")
+
         for w in (self, self.title, self.meta):
             w.bind("<Enter>", lambda e: self._set_hover(True))
             w.bind("<Leave>", lambda e: self._set_hover(False))
@@ -201,6 +206,8 @@ class Dashboard(tk.Toplevel):
                                   bg=T.CARD, cursor="hand2", padx=6)
         self.close_btn.pack(side="right")
         self.close_btn.bind("<Button-1>", lambda e: self.cb["hide"]())
+        Tooltip(self.pin_btn, "固定面板:移开鼠标不自动收起(再次点击取消)")
+        Tooltip(self.close_btn, "隐藏面板(悬浮球和右键菜单可再打开)")
 
         stats_row = tk.Frame(self.body, bg=T.CARD)
         stats_row.pack(fill="x", padx=12, pady=(0, 4))
@@ -232,6 +239,9 @@ class Dashboard(tk.Toplevel):
                                    cursor="hand2", padx=8, pady=4,
                                    command=lambda: self._submit(False))
         self.quick_btn.pack(side="left", padx=(6, 0))
+        Tooltip(self.entry, "输入文字:回车 = AI 分析;「+」= 按行快速添加")
+        Tooltip(self.ai_btn, "AI 分析:由 agent 从输入内容提取任务(标题 / 截止 / 优先级)")
+        Tooltip(self.quick_btn, "快速添加:不走 AI,每一行直接作为一条任务")
 
     def _build_drop_zone(self):
         self.drop_frame = tk.Frame(self.body, bg=T.CARD)
@@ -251,6 +261,9 @@ class Dashboard(tk.Toplevel):
                 w.dnd_bind("<<Drop>>", self._on_drop)
             except (tk.TclError, AttributeError):
                 pass  # tkdnd unavailable — typing still works
+        Tooltip(self.drop_zone,
+                "拖入即分析:图片由 AI 看图;txt/md/csv/json/代码直接读取;"
+                "docx 抽取正文;pdf/xls 等交给 agent 读取")
 
     def _build_list(self):
         self.list_frame = ScrollFrame(self.body, T.CARD)
@@ -267,6 +280,8 @@ class Dashboard(tk.Toplevel):
             highlightthickness=0, bd=0,
             command=lambda: self.cb["agent_toggle"](self.agent_var.get()))
         self.agent_chk.pack(side="right")
+        Tooltip(self.agent_chk,
+                "AI 分析开关:关闭后使用内置规则解析(速度最快,离线可用)")
         self.status = tk.Label(foot, text="就绪 · 拖入文件或输入文字",
                                font=T.font(8), fg=T.TEXT_DIM, bg=T.CARD,
                                anchor="w")
@@ -374,6 +389,9 @@ class PillWindow:
         root.bind("<Leave>", lambda e: cb["hover_pill"](False))
         root.bind("<Button-3>", self._on_menu)
         root.bind("<Double-Button-1>", lambda e: cb["pin"]())
+        Tooltip(root,
+                "AgentTodo 悬浮球:单击 展开面板 · 双击 固定面板\n"
+                "拖动 移动位置 · 右键 打开菜单", above=True, delay=250)
 
     def _draw(self, overall: int, total: int, done: int):
         c = self.canvas
