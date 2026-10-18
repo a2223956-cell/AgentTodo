@@ -11,6 +11,7 @@ import tkinter as tk
 from . import const
 from .analyzer import Analyzer, AgentAnalyzer
 from .content import DropContent, build_drop
+from .screen import clamp_xy, virtual_screen
 from .store import Task, TodoStore
 from .ui import DASH_H, DASH_W, PILL_SIZE, Dashboard, PillWindow
 
@@ -89,9 +90,8 @@ class App:
             pass
 
     def _default_pos(self):
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        return sw - PILL_SIZE - 40, sh // 2 - PILL_SIZE
+        x1, y1, x2, y2 = virtual_screen(self.root)
+        return x2 - PILL_SIZE - 40, y1 + (y2 - y1) // 2 - PILL_SIZE
 
     def reset_position(self):
         self.pill.move_to(*self._default_pos())
@@ -136,13 +136,14 @@ class App:
             self.root.after_cancel(self._open_job)
             self._open_job = None
         px, py = self.pill.position()
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
+        x1, y1, x2, y2 = virtual_screen(self.root)
+        w = min(DASH_W, x2 - x1 - 16)
+        h = min(DASH_H, y2 - y1 - 16)   # short screens shrink the list area
+        self.dashboard.resize(w, h)
         x = px + PILL_SIZE + 10
-        if x + DASH_W > sw - 12:
-            x = px - DASH_W - 10
-        x = max(8, min(x, sw - DASH_W - 8))
-        y = max(8, min(py, sh - DASH_H - 8))
+        if x + w > x2 - 12:
+            x = px - w - 10
+        x, y = clamp_xy(x, py, w, h, (x1 + 8, y1 + 8, x2 - 8, y2 - 8))
         self.dashboard.show_at(x, y)
 
     def hide_dashboard(self):

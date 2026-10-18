@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -81,6 +82,7 @@ class TodoStore:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
+            self._backup_corrupt()
             return
         for raw in data if isinstance(data, list) else data.get("tasks", []):
             try:
@@ -100,6 +102,13 @@ class TodoStore:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump([asdict(t) for t in self.tasks], f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
+
+    def _backup_corrupt(self) -> None:
+        """Keep the unreadable file: the next save() would otherwise destroy it."""
+        try:
+            shutil.copy2(self.path, self.path + ".bak")
+        except OSError:
+            pass
 
     # ---------- mutations ----------
     def add(self, raw: dict) -> Task:

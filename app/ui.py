@@ -5,6 +5,7 @@ import os
 import tkinter as tk
 
 from . import theme as T
+from .screen import clamp_xy, virtual_screen
 from .theme import rounded_rect
 from .tooltip import Tooltip
 
@@ -173,12 +174,11 @@ class Dashboard(tk.Toplevel):
 
         self.canvas = tk.Canvas(self, bg=T.TRANSPARENT, highlightthickness=0, bd=0)
         self.canvas.place(x=0, y=0, width=DASH_W, height=DASH_H)
-        rounded_rect(self.canvas, 0, 0, DASH_W - 1, DASH_H - 1, 18,
-                     fill=T.CARD, outline=T.STROKE)
 
         self.body = tk.Frame(self, bg=T.CARD)
         self.body.place(x=MARGIN, y=MARGIN, width=DASH_W - 2 * MARGIN,
                         height=DASH_H - 2 * MARGIN)
+        self.resize(DASH_W, DASH_H)
 
         self._build_header()
         self._build_add_row()
@@ -188,6 +188,17 @@ class Dashboard(tk.Toplevel):
 
         self.bind("<Enter>", lambda e: cb["hover_panel"](True))
         self.bind("<Leave>", lambda e: cb["hover_panel"](False))
+
+    def resize(self, w: int, h: int):
+        """Adaptive panel size; on short screens the list area shrinks."""
+        self._size = (w, h)  # never name attrs _w/_h: tkinter Widget owns _w
+        self.geometry(f"{w}x{h}")
+        self.canvas.place(x=0, y=0, width=w, height=h)
+        self.canvas.delete("all")
+        rounded_rect(self.canvas, 0, 0, w - 1, h - 1, 18,
+                     fill=T.CARD, outline=T.STROKE)
+        self.body.place(x=MARGIN, y=MARGIN, width=w - 2 * MARGIN,
+                        height=h - 2 * MARGIN)
 
     # ------------------------------------------------------------- sections
     def _build_header(self):
@@ -433,6 +444,7 @@ class PillWindow:
             self._moved = True
         x = self.root.winfo_x() + dx
         y = self.root.winfo_y() + dy
+        x, y = clamp_xy(x, y, PILL_SIZE, PILL_SIZE, virtual_screen(self.root))
         self.root.geometry(f"+{x}+{y}")
         self._drag = (event.x_root, event.y_root)
 

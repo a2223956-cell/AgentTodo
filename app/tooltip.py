@@ -4,6 +4,7 @@ from __future__ import annotations
 import tkinter as tk
 
 from . import theme as T
+from .screen import clamp_xy, virtual_screen
 
 
 class Tooltip:
@@ -73,15 +74,17 @@ class Tooltip:
                  wraplength=280).pack()
         tip.update_idletasks()
         w, h = tip.winfo_reqwidth(), tip.winfo_reqheight()
-        x = self.widget.winfo_rootx()
-        y = self.widget.winfo_rooty()
-        y = y - (h + 8) if self.above else y + self.widget.winfo_height() + 8
-        sw, sh = tip.winfo_screenwidth(), tip.winfo_screenheight()
-        x = max(4, min(x, sw - w - 4))
-        y = max(4, min(y, sh - h - 4))
+        x, y = self._place(w, h)
         tip.wm_geometry(f"+{x}+{y}")
         self._tip = tip
         self._watch()
+
+    def _place(self, w: int, h: int) -> tuple[int, int]:
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty()
+        y = y - (h + 8) if self.above else y + self.widget.winfo_height() + 8
+        vx1, vy1, vx2, vy2 = virtual_screen(self.widget)
+        return clamp_xy(x, y, w, h, (vx1 + 4, vy1 + 4, vx2 - 4, vy2 - 4))
 
     def _watch(self):
         """Drop the hint if the widget vanishes or its panel gets withdrawn."""

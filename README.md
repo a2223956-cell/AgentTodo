@@ -17,6 +17,8 @@ AgentTodo 是一个 Windows 桌面悬浮窗小工具:拖一张截图、一份文
 - **进度跟踪**:勾选完成、点击进度条 +25%(右键 -25%)、删除;悬浮球与面板顶部实时汇总。
 - **AI 可降级**:通过 `hermes chat` 复用你已配置的模型;AI 不可用或手动关闭时自动退回内置规则解析(离线可用)。
 - **持久化**:任务与悬浮球位置保存在 `%LOCALAPPDATA%\AgentTodoFloat\`,重启不丢。
+- **单实例保护**:重复启动会提示「已经在运行」,防止两个实例互相覆盖任务数据。
+- **多显示器 / 小屏幕适配**:面板、悬浮球、提示框均按全部显示器的实际范围定位;屏幕过矮时面板自动收缩,控件不会被裁掉。
 
 ## 快速开始
 
@@ -24,7 +26,7 @@ AgentTodo 是一个 Windows 桌面悬浮窗小工具:拖一张截图、一份文
 
 ```bat
 rem 首次安装(在本目录):
-py -3.15 -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 
 rem 启动悬浮球:
@@ -55,8 +57,9 @@ rem 开机自启(可选):
 
 | 位置 | 内容 |
 |---|---|
-| `%LOCALAPPDATA%\AgentTodoFloat\todos.json` | 任务清单(含进度) |
+| `%LOCALAPPDATA%\AgentTodoFloat\todos.json` | 任务清单(含进度;损坏时自动备份为 .bak) |
 | `%LOCALAPPDATA%\AgentTodoFloat\config.json` | 悬浮球位置、AI 开关、面板固定状态 |
+| `%LOCALAPPDATA%\AgentTodoFloat\lock.pid` | 单实例锁(退出时自动清理) |
 
 ## 命令行
 

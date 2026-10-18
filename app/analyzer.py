@@ -220,6 +220,30 @@ def build_query(dc: DropContent, extra_text: str = "") -> str:
     return "\n\n".join(parts)
 
 
+def _cmd_quote(arg: str) -> str:
+    """Quote one argument for cmd.exe so metacharacters (& | > ^) stay literal."""
+    return '"' + arg.replace('"', '""') + '"'
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and its children (.cmd shims leave node grandkids behind)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=10)
+        else:
+            proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
 class AgentAnalyzer:
     """Runs `hermes chat` one-shot and parses tasks out of the reply."""
 
@@ -271,22 +295,54 @@ class AgentAnalyzer:
         return args
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess | None:
-        """Execute hermes; .cmd shims may need cmd.exe, so fall back once."""
-        try:
-            return subprocess.run(
-                args, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=self.timeout, shell=False,
-            )
-        except (OSError, ValueError):
-            pass
-        try:
-            return subprocess.run(
-                ["cmd", "/c"] + args, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=self.timeout,
-                shell=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
+        """Execute hermes; batch shims need cmd.exe parsing, so route accordingly.
+
+        Batch targets (.bat/.cmd) always go through a fully quoted cmd.exe
+        command line: CreateProcess hands their arguments to cmd for
+        re-parsing, which splits unquoted args at & | > ^ (a dropped file
+        named "a&b.png" would become two commands). Timeouts kill the whole
+        process tree and propagate as TimeoutExpired.
+        """
+        exe = str(args[0] or "").lower()
+        if not (exe.endswith(".bat") or exe.endswith(".cmd")):
+            try:
+                return self._exec(args)
+            except (OSError, ValueError):
+                pass
+        if os.name != "nt":
             return None
+        try:
+            return self._exec_shell(" ".join(_cmd_quote(a) for a in args))
+        except (OSError, ValueError):
+            return None
+
+    def _exec(self, args: list[str]) -> subprocess.CompletedProcess:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", shell=False,
+        )
+        return self._communicate(proc, args)
+
+    def _exec_shell(self, cmdline: str) -> subprocess.CompletedProcess:
+        """Run a pre-quoted command line through cmd.exe (shell=True)."""
+        proc = subprocess.Popen(
+            cmdline, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", shell=True,
+        )
+        return self._communicate(proc, [cmdline])
+
+    def _communicate(self, proc: subprocess.Popen,
+                     args: list[str]) -> subprocess.CompletedProcess:
+        try:
+            out, err = proc.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+            raise
+        return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
 
 class Analyzer:

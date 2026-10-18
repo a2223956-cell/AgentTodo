@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app import const  # noqa: E402
+from app import const, lock  # noqa: E402
 
 STARTUP_NAME = "AgentTodo.bat"
 
@@ -63,6 +63,10 @@ def main() -> int:
         screenshot = args[args.index("--screenshot") + 1]
         os.environ["AGENTTODO_SMOKE_SHOT"] = screenshot
 
+    if not lock.acquire(const.data_dir(data_dir)):
+        lock.notify_duplicate()
+        return 1
+
     from app.app import App
 
     app = App(data_dir=data_dir, agent_enabled=agent_enabled, smoke=smoke)
@@ -71,6 +75,7 @@ def main() -> int:
     if smoke and "--smoke-agent" not in args:
         app.set_agent_enabled(False)  # deterministic smoke unless agent requested
     app.run()
+    lock.release()
     return 0
 
 
