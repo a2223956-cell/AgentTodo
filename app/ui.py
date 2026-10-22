@@ -66,13 +66,19 @@ class ScrollFrame(tk.Frame):
 
 
 class TaskRow(tk.Frame):
-    """One task: check circle, title/meta, progress bar, delete."""
+    """One task row, rendered according to ``task.mode``:
+
+    ``check`` — binary: 圆圈 + 待办/已完成，不出现百分比。
+    ``pct``   — quantifiable goal: 百分比进度条(左键 +25 / 右键 −25)。
+    行内 ``✓`` / ``％`` 按钮可随时切换这两者。
+    """
 
     def __init__(self, parent, task, cb):
         super().__init__(parent, bg=T.CARD_ALT, highlightthickness=0)
         self.task = task
         self.cb = cb  # dict of callables
         self._hover = False
+        self.quantified = getattr(task, "mode", "check") == "pct"
 
         self.check = tk.Canvas(self, width=22, height=22, bg=T.CARD_ALT,
                                highlightthickness=0, bd=0)
@@ -87,35 +93,82 @@ class TaskRow(tk.Frame):
         self.title.grid(row=0, column=1, sticky="ew", pady=(8, 0))
 
         meta_bits = []
-        if task.source:
-            meta_bits.append(task.source)
+        if getattr(task, "customer", ""):
+            meta_bits.append(f"客户 {task.customer}")
+        if getattr(task, "order_date", ""):
+            meta_bits.append(f"订单日 {task.order_date}")
+        if getattr(task, "amount", ""):
+            meta_bits.append(f"金额 {task.amount}")
         if task.due:
             meta_bits.append(f"截止 {task.due}")
+        if task.source:
+            meta_bits.append(task.source)
         prio_txt = {"high": "高", "med": "中", "low": "低"}.get(task.priority, "中")
         meta_bits.append(f"优先级 {prio_txt}")
         self.meta = tk.Label(self, text=" · ".join(meta_bits), font=T.font(8),
-                             fg=T.TEXT_DIM, bg=T.CARD_ALT, anchor="w")
-        self.meta.grid(row=1, column=1, sticky="ew", pady=(1, 8))
+                             fg=T.TEXT_DIM, bg=T.CARD_ALT, anchor="w",
+                             wraplength=240, justify="left")
+        self.meta.grid(row=1, column=1, sticky="ew", pady=(1, 3))
 
-        self.prog = tk.Canvas(self, width=96, height=18, bg=T.CARD_ALT,
-                              highlightthickness=0, bd=0)
-        self.prog.grid(row=0, column=2, rowspan=2, padx=(8, 4))
-        self.prog.bind("<Button-1>", lambda e: cb["progress"](task.id, min(100, task.progress + 25)))
-        self.prog.bind("<Button-3>", lambda e: cb["progress"](task.id, max(0, task.progress - 25)))
-        self._draw_progress()
+        # detail carries the specifics (产品清单 / 地址 / 联系人) — show one line
+        detail_txt = (task.detail or "").strip()
+        if detail_txt and detail_txt != task.title.strip():
+            self.detail = tk.Label(self, text=detail_txt, font=T.font(8),
+                                   fg=T.TEXT_SUB, bg=T.CARD_ALT, anchor="w",
+                                   wraplength=240, justify="left")
+            self.detail.grid(row=2, column=1, sticky="ew", pady=(0, 8))
+        else:
+            self.detail = None
+            self.meta.grid_configure(pady=(1, 8))
+
+        if self.quantified:
+            # quantifiable goal → percentage bar
+            self.prog = tk.Canvas(self, width=96, height=18, bg=T.CARD_ALT,
+                                  highlightthickness=0, bd=0)
+            self.prog.grid(row=0, column=2, rowspan=3, padx=(8, 4))
+            self.prog.bind("<Button-1>",
+                           lambda e: cb["progress"](task.id, min(100, task.progress + 25)))
+            self.prog.bind("<Button-3>",
+                           lambda e: cb["progress"](task.id, max(0, task.progress - 25)))
+            self.side = self.prog
+            self._draw_progress()
+            Tooltip(self.prog, "左键 +25%;右键 −25%;点右侧「✓」改回完成勾选")
+        else:
+            # one-off item → binary state only, no percentages
+            self.state_lbl = tk.Label(
+                self, text="已完成" if task.done else "待办",
+                font=T.font(8, True),
+                fg=T.OK if task.done else T.TEXT_DIM,
+                bg=T.CARD_ALT, cursor="hand2", padx=6)
+            self.state_lbl.grid(row=0, column=2, rowspan=3, padx=(8, 4))
+            self.state_lbl.bind("<Button-1>", lambda e: cb["toggle"](task.id))
+            self.side = self.state_lbl
+            Tooltip(self.state_lbl, "点我切换 完成/未完成;点右侧「％」改为百分比进度")
+
+        # per-task mode switch: ✓ → 完成勾选 / ％ → 百分比进度
+        self.mode_btn = tk.Label(self, text="✓" if self.quantified else "％",
+                                 font=T.font(9), fg=T.TEXT_DIM, bg=T.CARD_ALT,
+                                 cursor="hand2", padx=5)
+        self.mode_btn.grid(row=0, column=3, rowspan=3)
+        self.mode_btn.bind("<Button-1>", lambda e: cb["mode"](
+            task.id, "check" if self.quantified else "pct"))
 
         self.del_btn = tk.Label(self, text="✕", font=T.font(10), fg=T.TEXT_DIM,
                                 bg=T.CARD_ALT, cursor="hand2", padx=6)
-        self.del_btn.grid(row=0, column=3, rowspan=2, padx=(2, 8))
+        self.del_btn.grid(row=0, column=4, rowspan=3, padx=(2, 8))
         self.del_btn.bind("<Button-1>", lambda e: cb["delete"](task.id))
 
         Tooltip(self.check, "点击切换完成 / 未完成")
-        Tooltip(self.prog, "左键 +25% 进度;右键 -25%")
+        Tooltip(self.mode_btn, "改为「完成勾选」,不显示百分比" if self.quantified
+                else "改为「百分比进度」,可记 0-100%")
         Tooltip(self.del_btn, "删除此任务")
 
-        for w in (self, self.title, self.meta):
+        for w in (self, self.title, self.meta, self.side, self.mode_btn, self.del_btn):
             w.bind("<Enter>", lambda e: self._set_hover(True))
             w.bind("<Leave>", lambda e: self._set_hover(False))
+        if self.detail is not None:
+            self.detail.bind("<Enter>", lambda e: self._set_hover(True))
+            self.detail.bind("<Leave>", lambda e: self._set_hover(False))
         self.columnconfigure(1, weight=1)
 
     def _draw_check(self):
@@ -134,6 +187,8 @@ class TaskRow(tk.Frame):
             c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=ring, width=2)
 
     def _draw_progress(self):
+        if not self.quantified:
+            return  # binary rows have no percentage surface
         c = self.prog
         c.delete("all")
         bg = T.CARD_ALT if not self._hover else T.CARD_HOVER
@@ -150,7 +205,10 @@ class TaskRow(tk.Frame):
     def _set_hover(self, on: bool):
         self._hover = on
         bg = T.CARD_HOVER if on else T.CARD_ALT
-        for w in (self, self.title, self.meta, self.del_btn):
+        widgets = [self, self.title, self.meta, self.side, self.mode_btn, self.del_btn]
+        if self.detail is not None:
+            widgets.append(self.detail)
+        for w in widgets:
             w.configure(bg=bg)
         self._draw_check()
         self._draw_progress()
@@ -187,6 +245,8 @@ class Dashboard(tk.Toplevel):
         self._build_footer()
 
         self.bind("<Enter>", lambda e: cb["hover_panel"](True))
+        # 面板里任何一次左键点击 = 用户要它留着(与 ◎ 固定同义)
+        self.bind("<Button-1>", lambda e: cb.get("pin_keep") and cb["pin_keep"]())
         self.bind("<Leave>", lambda e: cb["hover_panel"](False))
 
     def resize(self, w: int, h: int):

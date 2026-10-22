@@ -193,13 +193,19 @@ PROMPT_HEADER = """你是任务提取助手。请阅读下面的内容(可能包
 只输出一个 JSON 对象,不要输出任何解释或其他文字。
 
 输出格式:
-{"tasks":[{"title":"任务标题","detail":"补充说明","due":"截止时间,没有则为空字符串","priority":"high|med|low","progress":0}]}
+{"tasks":[{"title":"任务标题","detail":"补充说明","due":"截止时间,没有则为空字符串","priority":"high|med|low","mode":"check|pct","customer":"客户名称,没有则空","order_date":"订单日期,没有则空","amount":"金额(含币种),没有则空","progress":0}]}
 
 规则:
 1. title 用简体中文、简洁明确、动词开头,不超过 30 个字。
 2. 图片和文档请用你的读取工具打开对应路径后再提取任务。
 3. 提取所有明确的待办/日程/工作安排;内容里没有明确任务时,提取最值得跟进的 1-5 条事项。
 4. due 只保留原文出现的时间描述;progress 一律填 0。
+5. mode 只能是 check 或 pct:目标是可量化推进的(如"拜访 30 家客户""销量做到 50 万""整理 100 条数据""完成率 80%")用 pct;
+   一次做完就结束的事项(如"回复邮件""提交报价单""预约牙医")用 check。判断不了时用 check。
+6. 订单/合同/PO/PI/形式发票类单据:第一个任务是"跟进 <客户名> 的 <单号> 交付/处理",标题里必须写出客户名称(有单号就带单号);
+   customer 填客户或收货方名称,order_date 填单据上的订单日期(原样照抄),amount 填订单总金额(保留币种与千分位,例如 "USD 12,345.00");
+   due 优先取交期/发货日期。单据里找不到的字段一律填空字符串,不要猜。
+7. 同一张订单可以再拆出 1-2 条具体执行任务(核对产品清单与数量、联系客户确认交期等),这些任务同样复用上面的 customer / order_date / amount。
 """
 
 
@@ -316,10 +322,28 @@ class AgentAnalyzer:
         except (OSError, ValueError):
             return None
 
+    @staticmethod
+    def _spawn_kwargs() -> dict:
+        """Launch hermes with piped stdio and NO console window.
+
+        The app runs under pythonw.exe, which owns no console; Windows would
+        therefore allocate a brand-new visible console for the console-subsystem
+        hermes child. That window is not just noise: it hands the CLI a real TTY
+        on stdin, so it takes the interactive/approval path and blocks until the
+        analyzer's timeout fires — the drop then silently degrades to the
+        heuristic parser. Piped stdio + CREATE_NO_WINDOW keeps the CLI on its
+        deterministic one-shot path.
+        """
+        kw: dict = {"stdin": subprocess.DEVNULL}
+        if os.name == "nt":
+            kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        return kw
+
     def _exec(self, args: list[str]) -> subprocess.CompletedProcess:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", shell=False,
+            **self._spawn_kwargs(),
         )
         return self._communicate(proc, args)
 
@@ -328,6 +352,7 @@ class AgentAnalyzer:
         proc = subprocess.Popen(
             cmdline, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", shell=True,
+            **self._spawn_kwargs(),
         )
         return self._communicate(proc, [cmdline])
 
@@ -356,6 +381,14 @@ class Analyzer:
         used_agent = False
         if self.agent_enabled and self.agent.available():
             tasks, note = self.agent.analyze(dc, extra_text)
+            if not tasks:
+                # One retry: a transient CLI/API blip must not silently degrade
+                # a drop into the rule parser (which yields "处理文件：<name>").
+                retry_tasks, retry_note = self.agent.analyze(dc, extra_text)
+                if retry_tasks:
+                    tasks, note = retry_tasks, retry_note + "(重试成功)"
+                else:
+                    note = f"{note} · 重试后仍失败"
             used_agent = bool(tasks)
         else:
             tasks, note = [], ("AI 分析已关闭" if not self.agent_enabled

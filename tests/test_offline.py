@@ -58,6 +58,41 @@ class TestStore(unittest.TestCase):
         n2 = normalize_task({})
         self.assertTrue(n2["title"])  # never empty
 
+    def test_order_fields(self):
+        t = self.store.add({"title": "跟进 ROVSEA 订单 1610R 交付", "customer": "ROVSEA",
+                            "order_date": "2026-10-16", "amount": "USD 12,345.00"})
+        self.assertEqual((t.customer, t.order_date, t.amount),
+                         ("ROVSEA", "2026-10-16", "USD 12,345.00"))
+        # aliases the agent may emit
+        n = normalize_task({"title": "x", "client": "Chasing", "total": "EUR 900"})
+        self.assertEqual((n["customer"], n["amount"]), ("Chasing", "EUR 900"))
+        # editing another field must not drop them, and they survive a reload
+        self.store.update(t.id, priority="high")
+        self.assertEqual(self.store.get(t.id).amount, "USD 12,345.00")
+        self.assertEqual(TodoStore(self.path).get(t.id).customer, "ROVSEA")
+
+    def test_mode_check_vs_pct(self):
+        # no mode in the payload → 0/100 = binary, a mid value = quantified goal
+        a = self.store.add({"title": "回复邮件", "progress": 0})
+        b = self.store.add({"title": "拜访30家客户", "progress": 40})
+        c = self.store.add({"title": "提交报价单", "progress": 0, "mode": "pct"})
+        self.assertEqual((a.mode, b.mode, c.mode), ("check", "pct", "pct"))
+        # setting a mid value on a binary task promotes it to percentage tracking
+        self.store.set_progress(a.id, 50)
+        self.assertEqual(self.store.get(a.id).mode, "pct")
+        # switching back to check snaps the value to 0/100
+        self.store.set_mode(a.id, "check")
+        self.assertEqual(self.store.get(a.id).mode, "check")
+        self.assertEqual(self.store.get(a.id).progress, 100)
+        # editing other fields must not lose the mode
+        self.store.update(c.id, title="提交ROVSEA报价单")
+        self.assertEqual(self.store.get(c.id).mode, "pct")
+        # mode survives a reload from disk
+        self.assertEqual(TodoStore(self.path).get(c.id).mode, "pct")
+        # unknown mode string falls back to the progress-based inference
+        self.assertEqual(normalize_task({"title": "x", "mode": "???"})["mode"], "check")
+        self.assertEqual(normalize_task({"title": "x", "mode": "百分比"})["mode"], "pct")
+
 
 class TestJsonExtraction(unittest.TestCase):
     def test_fenced_json(self):

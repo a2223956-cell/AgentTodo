@@ -73,7 +73,11 @@ def main() -> int:
     if "--reset-position" in args:
         app.reset_position()
     if smoke and "--smoke-agent" not in args:
-        app.set_agent_enabled(False)  # deterministic smoke unless agent requested
+        # 仅本次运行内存中关闭(确定性自检),不落盘:set_agent_enabled() 会把
+        # agent_enabled 写进 config.json,否则每次 --smoke 都会把用户的 AI
+        # 开关持久化成关闭,重启后 AI 分析被静默降级为规则解析。
+        app.analyzer.agent_enabled = False
+        app.dashboard.set_agent_enabled(False)
     app.run()
     lock.release()
     return 0

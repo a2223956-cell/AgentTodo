@@ -35,6 +35,11 @@ class App:
         self._hover = False
         self._hover_job = None
         self._open_job = None
+        self._watch_job = None
+        self._left_at = None
+        self._smoke = bool(smoke)
+        self._pos = (0, 0)          # 意图坐标:首帧映射前 winfo_x/y 还读不到真值
+        self._pos_pending = False   # 刚 set 过意图坐标,Tk 还没应用
 
         try:
             from tkinterdnd2 import TkinterDnD
@@ -47,6 +52,7 @@ class App:
             "hover_panel": self._on_hover_panel,
             "click": self.toggle_dashboard,
             "pin": self.toggle_pin,
+            "pin_keep": self.keep_open,
             "hide": self.hide_dashboard,
             "moved": self._save_config,
             "reset_position": self.reset_position,
@@ -56,6 +62,7 @@ class App:
             "drop": self.on_drop,
             "toggle": self.toggle_task,
             "progress": self.set_progress,
+            "mode": self.set_mode,
             "delete": self.delete_task,
             "agent_toggle": self.set_agent_enabled,
             "stats": self.store.stats,
@@ -66,7 +73,15 @@ class App:
         self.dashboard.set_agent_enabled(bool(self.config.get("agent_enabled", True)))
 
         x, y = self.config.get("pos") or self._default_pos()
-        self.pill.move_to(int(x), int(y))
+        # 保存的位置可能指向一块已经被拔掉的显示器。启动时按当前屏幕布局夹一次:
+        # 注意要夹"配置里的意图坐标",此刻 winfo_x/y 还没生效(会读成 0,0)。
+        self._screen_sig = self._screen_bounds()
+        bx1, by1, bx2, by2 = self._screen_sig
+        cx, cy = clamp_xy(int(x), int(y), PILL_SIZE, PILL_SIZE,
+                          (bx1 + 4, by1 + 4, bx2 - 4, by2 - 4))
+        self._place_pill(cx, cy)
+        if (cx, cy) != (int(x), int(y)):
+            self._save_config()
         self.refresh()
         self.root.after(120, self._poll)
         if smoke:
@@ -81,7 +96,17 @@ class App:
             return {}
 
     def _save_config(self):
-        self.config["pos"] = list(self.pill.position())
+        live = None
+        try:
+            if self.root.winfo_viewable():
+                live = (int(self.root.winfo_x()), int(self.root.winfo_y()))
+        except tk.TclError:
+            live = None
+        # A freshly placed pill has not been applied by Tk yet — keep the
+        # intended coords instead of the stale ones winfo still reports.
+        if live is not None and not self._pos_pending:
+            self._pos = live
+        self.config["pos"] = list(self._pos)
         self.config["pinned"] = self._pinned
         try:
             with open(const.config_path(self.dir), "w", encoding="utf-8") as f:
@@ -94,47 +119,150 @@ class App:
         return x2 - PILL_SIZE - 40, y1 + (y2 - y1) // 2 - PILL_SIZE
 
     def reset_position(self):
-        self.pill.move_to(*self._default_pos())
+        self._place_pill(*self._default_pos())
         self._save_config()
         self.dashboard.set_status("悬浮球位置已重置")
 
+    # ------------------------------------------------------------- screen
+    def _screen_bounds(self):
+        return virtual_screen(self.root)
+
+    def _pill_pos(self) -> tuple[int, int]:
+        """Live pill position, or the last intended one before the first map."""
+        try:
+            if self.root.winfo_viewable():
+                return int(self.root.winfo_x()), int(self.root.winfo_y())
+        except tk.TclError:
+            pass
+        return self._pos
+
+    def _place_pill(self, x: int, y: int):
+        self._pos = (int(x), int(y))
+        self._pos_pending = True
+        self.pill.move_to(*self._pos)
+        self.root.after_idle(self._clear_pos_pending)
+
+    def _clear_pos_pending(self):
+        self._pos_pending = False
+
+    def _clamp_to_screens(self, x: int | None = None, y: int | None = None,
+                          save: bool = True) -> bool:
+        """Keep the pill (and the open panel) inside the CURRENT monitor layout.
+
+        Unplugging a monitor leaves the saved position on a screen that no
+        longer exists — without this the ball is simply gone until the user
+        runs `--reset-position` or edits config.json by hand.
+
+        Pass x/y to clamp an intended position (startup, before the window has
+        been mapped and winfo_x/y are still 0); omit them to clamp the live
+        position.
+        """
+        x1, y1, x2, y2 = self._screen_bounds()
+        bounds = (x1 + 4, y1 + 4, x2 - 4, y2 - 4)
+        if x is None or y is None:
+            x, y = self._pill_pos()
+        cx, cy = clamp_xy(int(x), int(y), PILL_SIZE, PILL_SIZE, bounds)
+        moved = (cx, cy) != (int(x), int(y))
+        if moved:
+            self._place_pill(cx, cy)
+            if self.dashboard.state() != "withdrawn":
+                self.show_dashboard()   # re-clamp the panel beside the ball
+            if save:
+                self._save_config()
+        return moved
+
+    def _screen_watch(self):
+        """Hot-plug / unplug / DPI change: pull the ball back onto a live screen."""
+        self.root.after(2000, self._screen_watch)
+        try:
+            sig = self._screen_bounds()
+        except Exception:
+            return
+        if sig != self._screen_sig:
+            self._screen_sig = sig
+            if self._clamp_to_screens():
+                self.dashboard.set_status("检测到显示器变化,悬浮球已移回可见屏幕")
+
     # ------------------------------------------------------------- hover
+    # 悬停悬浮球 → 展开面板;鼠标离开「球 + 面板」后自动收起(未固定时)。
+    # overrideredirect + 透明色窗口在 Windows 上 <Enter>/<Leave> 会漏事件,
+    # 所以收起判定统一交给指针轮询(150ms),事件只用来即时展开。
+    HOVER_OPEN_MS = 110        # 悬停多久展开
+    HOVER_CLOSE_MS = 380       # 离开多久收起(留出从球移到面板的时间)
+    HOVER_POLL_MS = 150
+
     def _on_hover_pill(self, entered: bool):
         self._hover = entered
         if entered:
-            self._open_job = self.root.after(120, self.show_dashboard)
+            self._left_at = None
+            if self._open_job:
+                self.root.after_cancel(self._open_job)
+            self._open_job = self.root.after(self.HOVER_OPEN_MS, self.show_dashboard)
 
     def _on_hover_panel(self, entered: bool):
         self._hover = entered
-        if entered and self._open_job:
-            self.root.after_cancel(self._open_job)
-            self._open_job = None
-        if not entered:
-            self._schedule_close_check()
+        if entered:
+            self._left_at = None
+            if self._open_job:
+                self.root.after_cancel(self._open_job)
+                self._open_job = None
 
-    def _schedule_close_check(self):
-        if self._hover_job:
-            self.root.after_cancel(self._hover_job)
-        self._hover_job = self.root.after(450, self._close_check)
+    def keep_open(self):
+        """Click inside the panel = keep it open (same state as the ◎ pin)."""
+        if not self._pinned:
+            self._pinned = True
+            self.dashboard.set_pinned(True)
+            self._save_config()
 
-    def _close_check(self):
-        if self._pinned:
-            return
+    def _pointer_inside(self) -> bool:
+        # typing in the composer counts as "inside" even if the mouse drifted off
+        try:
+            focus = self.root.focus_get()
+        except (tk.TclError, KeyError):
+            focus = None
+        if focus is not None and isinstance(focus, tk.Misc):
+            try:
+                if focus.winfo_toplevel() is self.dashboard:
+                    return True
+            except tk.TclError:
+                pass
         try:
             px, py = self.root.winfo_pointerxy()
-            w = self.root.winfo_containing(px, py)
+            widget = self.root.winfo_containing(px, py)
         except tk.TclError:
-            w = None
-        if w is not None:
-            top = w.winfo_toplevel()
-            if top in (self.root, self.dashboard):
-                return
-        self.hide_dashboard()
+            return False
+        if widget is None:
+            return False
+        try:
+            top = widget.winfo_toplevel()
+        except tk.TclError:
+            return False
+        return top is self.root or top is self.dashboard
+
+    def _hover_watch(self):
+        """Auto-hide driver: the panel closes itself once the pointer has left."""
+        self._watch_job = self.root.after(self.HOVER_POLL_MS, self._hover_watch)
+        if self._pinned or self._smoke:
+            self._left_at = None
+            return
+        if self.dashboard.state() == "withdrawn":
+            self._left_at = None
+            return
+        if self._pointer_inside():
+            self._left_at = None
+            return
+        now = time.time()
+        if self._left_at is None:
+            self._left_at = now
+        elif (now - self._left_at) * 1000 >= self.HOVER_CLOSE_MS:
+            self._left_at = None
+            self.hide_dashboard()
 
     def show_dashboard(self):
         if self._open_job:
             self.root.after_cancel(self._open_job)
             self._open_job = None
+        self._left_at = None
         px, py = self.pill.position()
         x1, y1, x2, y2 = virtual_screen(self.root)
         w = min(DASH_W, x2 - x1 - 16)
@@ -147,6 +275,15 @@ class App:
         self.dashboard.show_at(x, y)
 
     def hide_dashboard(self):
+        for job in (self._open_job, self._hover_job):
+            if job:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+        self._open_job = None
+        self._hover_job = None
+        self._left_at = None
         self.dashboard.withdraw()
 
     def toggle_dashboard(self):
@@ -238,6 +375,15 @@ class App:
         self.store.set_progress(task_id, progress)
         self.refresh()
 
+    def set_mode(self, task_id: str, mode: str):
+        """Per-task switch: 百分比进度 ↔ 完成勾选."""
+        task = self.store.set_mode(task_id, mode)
+        self.refresh()
+        if task is not None:
+            self.dashboard.set_status(
+                "已改为百分比进度(可记 0-100%)" if task.mode == "pct"
+                else "已改为完成勾选(只看完成/未完成)")
+
     def delete_task(self, task_id: str):
         self.store.delete(task_id)
         self.refresh()
@@ -265,6 +411,8 @@ class App:
         self.root.destroy()
 
     def run(self):
+        self._hover_watch()
+        self._screen_watch()
         self.root.mainloop()
 
     # ------------------------------------------------------------- smoke
