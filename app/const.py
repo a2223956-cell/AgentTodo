@@ -3,7 +3,7 @@ import os
 
 APP_NAME = "AgentTodo"
 APP_NAME_CN = "AgentTodo 悬浮待办"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # Text pulled from dropped files is capped so agent prompts stay bounded.
 MAX_FILE_CHARS = 6000

@@ -10,6 +10,7 @@ TEXT_SUB = "#9AA3BC"
 TEXT_DIM = "#6B7392"
 ACCENT = "#6E8BFF"
 ACCENT_SOFT = "#3A4370"
+ON_ACCENT = "#0E1020"    # text/dot sitting on an ACCENT/DANGER fill
 TOOLTIP_BG = "#0E1120"   # hover hint background
 OK = "#4ADE80"
 WARN = "#FBBF24"

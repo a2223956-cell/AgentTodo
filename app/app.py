@@ -8,7 +8,7 @@ import threading
 import time
 import tkinter as tk
 
-from . import const
+from . import const, logsetup, status
 from .analyzer import Analyzer, AgentAnalyzer
 from .content import DropContent, build_drop
 from .screen import clamp_xy, virtual_screen
@@ -20,7 +20,10 @@ class App:
     def __init__(self, data_dir: str | None = None, agent_enabled: bool | None = None,
                  smoke: bool = False):
         self.dir = const.data_dir(data_dir)
+        self.log = logsetup.setup(self.dir)
         self.store = TodoStore(const.store_path(self.dir))
+        self._last_note = ""
+        self._last_error = ""
         self.config = self._load_config()
         if agent_enabled is not None:
             self.config["agent_enabled"] = agent_enabled
@@ -113,6 +116,34 @@ class App:
                 json.dump(self.config, f, ensure_ascii=False, indent=1)
         except OSError:
             pass
+
+    # ------------------------------------------------------------- status
+    def _status_payload(self, running: bool | None = None, stats: dict | None = None) -> dict:
+        """The one object outside readers see (``status.json``, see status.py)."""
+        s = stats if stats is not None else self.store.stats()
+        return {
+            "running": True if running is None else bool(running),
+            "pid": os.getpid(),
+            "app_dir": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "analyzing": bool(self._busy),
+            "queue": len(self._pending),
+            "total": s.get("total", 0),
+            "done": s.get("done", 0),
+            "overall": s.get("overall", 0),
+            "overdue": s.get("overdue", 0),
+            "due_today": s.get("due_today", 0),
+            "ai": bool(self.analyzer.agent_enabled),
+            "last_note": self._last_note,
+            "last_error": self._last_error,
+        }
+
+    def _write_status(self, running: bool | None = None, stats: dict | None = None):
+        status.write(self.dir, self._status_payload(running, stats))
+
+    def _status_beat(self):
+        """Keep the heartbeat fresh; a dead app must stop looking alive."""
+        self.root.after(5000, self._status_beat)
+        self._write_status()
 
     def _default_pos(self):
         x1, y1, x2, y2 = virtual_screen(self.root)
@@ -332,23 +363,35 @@ class App:
         n = len(self._pending)
         self.dashboard.set_status(
             "正在分析内容…" if n == 0 else f"正在分析内容… (队列中 {n} 项)")
+        self._write_status()   # chip shows "分析中" within its poll interval
         threading.Thread(target=self._worker, args=(dc,), daemon=True).start()
 
     def _worker(self, dc: DropContent):
+        started = time.time()
         try:
             tasks, note = self.analyzer.analyze(dc)
         except Exception as e:  # never let a worker die silently
             tasks, note = [], f"分析出错: {e}"
-        self._queue.put((tasks, note))
+            self.log.exception("analyzer crashed for %r", dc.label)
+        self._queue.put((tasks, note, time.time() - started, dc.label))
 
     def _poll(self):
         try:
             while True:
-                tasks, note = self._queue.get_nowait()
+                tasks, note, elapsed, label = self._queue.get_nowait()
                 added = self.add_tasks(tasks, note, quiet=True)
+                self._last_note = note
+                self._last_error = "" if tasks else note
+                if tasks:
+                    self.log.info("analyze %r -> %d task(s) in %.1fs (%s)",
+                                  label, len(tasks), elapsed, note)
+                else:
+                    self.log.warning("analyze %r produced no task in %.1fs (%s)",
+                                     label, elapsed, note)
                 self.dashboard.set_status(f"已添加 {added} 条任务 · {note}")
                 self._busy = False
                 self._kick_worker()
+                self._write_status()
         except queue.Empty:
             pass
         self.root.after(120, self._poll)
@@ -401,18 +444,25 @@ class App:
 
     # ------------------------------------------------------------- render
     def refresh(self):
-        tasks = self.store.all()
+        tasks = self.store.ordered()
         stats = self.store.stats()
         self.dashboard.refresh(tasks, stats)
         self.pill.update_progress(stats)
+        self._write_status(stats=stats)
 
     def quit(self):
         self._save_config()
+        self._write_status(running=False)
+        self.log.info("quit")
         self.root.destroy()
 
     def run(self):
         self._hover_watch()
         self._screen_watch()
+        self._status_beat()
+        self.log.info("run: tasks=%d agent=%s pos=%s pinned=%s",
+                      len(self.store.tasks), self.analyzer.agent_enabled,
+                      self._pos, self._pinned)
         self.root.mainloop()
 
     # ------------------------------------------------------------- smoke

@@ -20,6 +20,13 @@ DASH_H = 580
 MARGIN = 10  # inset of content inside the rounded panel
 
 
+def _task_sig(task) -> tuple:
+    """Everything a row renders — a row whose signature didn't change is reused."""
+    return (task.title, task.detail, task.source, task.due, task.due_at,
+            task.customer, task.order_date, task.amount, task.priority,
+            task.mode, task.progress)
+
+
 def _parse_drop_data(widget, data: str) -> list[str]:
     """Split a tkdnd drop payload into a python list (handles {paths with spaces})."""
     try:
@@ -238,6 +245,20 @@ class Dashboard(tk.Toplevel):
                         height=DASH_H - 2 * MARGIN)
         self.resize(DASH_W, DASH_H)
 
+        # Incremental list state: one row widget per task id, reused across
+        # refreshes.  Rebuilding every row on every click cost 183 ms at 15
+        # tasks and >1 s at 80 (measured) — a click must not repaint the list.
+        # Declared BEFORE the sections: the overall-bar <Configure> binding
+        # fires during first layout and reads these.
+        self._rows: dict[str, TaskRow] = {}
+        self._row_order: list[str] = []
+        self._empty: tk.Label | None = None
+        self._done_header: tk.Frame | None = None
+        self._done_label: tk.Label | None = None
+        self._done_open = False
+        self._tasks: list = []
+        self._stats: dict = {}
+
         self._build_header()
         self._build_add_row()
         self._build_drop_zone()
@@ -282,12 +303,17 @@ class Dashboard(tk.Toplevel):
 
         stats_row = tk.Frame(self.body, bg=T.CARD)
         stats_row.pack(fill="x", padx=12, pady=(0, 4))
-        self.overall_bar = tk.Canvas(stats_row, height=10, bg=T.CARD,
-                                     highlightthickness=0, bd=0)
-        self.overall_bar.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        # Pack the counter BEFORE the bar: with side="left" + expand the bar
+        # otherwise eats the whole cavity and the label collapses to zero width
+        # (it was invisible in every screenshot before this).
         self.stats_label = tk.Label(stats_row, text="0/0", font=T.font(9, True),
                                     fg=T.TEXT_SUB, bg=T.CARD)
         self.stats_label.pack(side="right")
+        self.overall_bar = tk.Canvas(stats_row, height=10, bg=T.CARD,
+                                     highlightthickness=0, bd=0)
+        self.overall_bar.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.overall_bar.bind("<Configure>",
+                              lambda e: self._draw_overall(self._stats))
 
     def _build_add_row(self):
         row = tk.Frame(self.body, bg=T.CARD)
@@ -299,8 +325,8 @@ class Dashboard(tk.Toplevel):
         self.entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 8))
         self.entry.bind("<Return>", lambda e: self._submit(True))
         self.ai_btn = tk.Button(row, text="AI 分析", font=T.font(9, True),
-                                bg=T.ACCENT, fg="#0E1020", activebackground=T.ACCENT,
-                                activeforeground="#0E1020", relief="flat",
+                                bg=T.ACCENT, fg=T.ON_ACCENT, activebackground=T.ACCENT,
+                                activeforeground=T.ON_ACCENT, relief="flat",
                                 cursor="hand2", padx=10, pady=4,
                                 command=lambda: self._submit(True))
         self.ai_btn.pack(side="left")
@@ -388,25 +414,102 @@ class Dashboard(tk.Toplevel):
 
     # ------------------------------------------------------------- updates
     def refresh(self, tasks, stats):
-        for child in self.list_frame.body.winfo_children():
-            child.destroy()
-        if not tasks:
-            empty = tk.Label(self.list_frame.body,
-                             text="暂无任务 — 拖入文件、图片,或在上方输入文字",
-                             font=T.font(9), fg=T.TEXT_DIM, bg=T.CARD, pady=30)
-            empty.pack(fill="x")
-        else:
-            for t in tasks:
-                row = TaskRow(self.list_frame.body, t, self.cb)
-                row.pack(fill="x", pady=(0, 4))
-        self._draw_overall(stats)
+        self._tasks = list(tasks)
+        self._stats = stats
+        self._render()
+
+    def _render(self):
+        """Rebuild only what changed, then fix the order if it moved.
+
+        The scroll position survives because the canvas body is never emptied
+        (measured: yview stays put across a refresh).
+        """
+        body = self.list_frame.body
+        active = [t for t in self._tasks if not t.done]
+        done_all = [t for t in self._tasks if t.done]
+        done = done_all if self._done_open else []
+
+        for t in active + done:
+            sig = _task_sig(t)
+            row = self._rows.get(t.id)
+            if row is not None and getattr(row, "_sig", "") == sig:
+                continue
+            if row is not None:
+                row.destroy()
+            row = TaskRow(body, t, self.cb)
+            row._sig = sig
+            self._rows[t.id] = row
+
+        keep = {t.id for t in active + done}
+        for tid in [k for k in self._rows if k not in keep]:
+            self._rows.pop(tid).destroy()
+
+        self._sync_done_header(len(done_all))
+        self._sync_empty(bool(self._tasks))
+
+        order = [self._rows[t.id] for t in active]
+        if self._done_header is not None:
+            order.append(self._done_header)
+        order += [self._rows[t.id] for t in done]
+        if self._empty is not None:
+            order.append(self._empty)
+        if body.pack_slaves() != order:
+            for w in order:
+                w.pack_forget()
+            for w in order:
+                w.pack(fill="x", pady=0 if w is self._empty else (0, 4))
+
+        self._row_order = [t.id for t in active + done]
+        self._draw_overall(self._stats)
         self.stats_label.configure(
-            text=f"{stats.get('done', 0)}/{stats.get('total', 0)} 完成")
+            text=f"{self._stats.get('done', 0)}/{self._stats.get('total', 0)} 完成")
+
+    def _sync_done_header(self, n_done: int):
+        if n_done == 0:
+            if self._done_header is not None:
+                self._done_header.destroy()
+                self._done_header = None
+                self._done_label = None
+            self._done_open = False
+            return
+        if self._done_header is None:
+            frame = tk.Frame(self.list_frame.body, bg=T.CARD)
+            label = tk.Label(frame, text="", font=T.font(8), fg=T.TEXT_DIM,
+                             bg=T.CARD, anchor="w", cursor="hand2", pady=6)
+            label.pack(side="left", fill="x", expand=True)
+            label.bind("<Button-1>", lambda e: self._toggle_done())
+            self._done_header = frame
+            self._done_label = label
+        self._done_label.configure(
+            text=(f"▾ 已完成 {n_done} 条 · 点击收起" if self._done_open
+                  else f"▸ 已完成 {n_done} 条 · 点击展开"))
+
+    def _toggle_done(self):
+        self._done_open = not self._done_open
+        self._render()
+
+    def _sync_empty(self, has_tasks: bool):
+        if has_tasks:
+            if self._empty is not None:
+                self._empty.destroy()
+                self._empty = None
+            return
+        if self._empty is None:
+            self._empty = tk.Label(
+                self.list_frame.body,
+                text="暂无任务 — 拖入文件、图片,或在上方输入文字",
+                font=T.font(9), fg=T.TEXT_DIM, bg=T.CARD, pady=30)
 
     def _draw_overall(self, stats):
+        stats = stats or {}
         c = self.overall_bar
         c.delete("all")
-        w = max(120, c.winfo_width())
+        # Before the first layout pass the canvas reports width 1 — fall back to
+        # the row's own budget so the very first paint isn't a 120 px stub.
+        w = c.winfo_width()
+        if w <= 1:
+            w = max(120, (self._size[0] if getattr(self, "_size", None) else DASH_W)
+                    - 2 * MARGIN - 12 - 64)
         p = stats.get("overall", 0)
         rounded_rect(c, 0, 1, w, 9, 4, fill=T.CARD_ALT, outline=T.STROKE)
         if p > 0:
@@ -428,7 +531,7 @@ class Dashboard(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
         self.deiconify()
         self.lift()
-        self._draw_overall(self.cb["stats"]())
+        self._draw_overall(self._stats)
 
 
 class PillWindow:
@@ -464,7 +567,8 @@ class PillWindow:
                 "AgentTodo 悬浮球:单击 展开面板 · 双击 固定面板\n"
                 "拖动 移动位置 · 右键 打开菜单", above=True, delay=250)
 
-    def _draw(self, overall: int, total: int, done: int):
+    def _draw(self, overall: int, total: int, done: int,
+              overdue: int = 0, due_today: int = 0):
         c = self.canvas
         c.delete("all")
         rounded_rect(c, 2, 2, PILL_SIZE - 2, PILL_SIZE - 2, 22,
@@ -479,10 +583,20 @@ class PillWindow:
                       font=T.font(13, True), fill=T.TEXT)
         c.create_text(PILL_SIZE / 2, PILL_SIZE / 2 + 13, text=f"{done}/{total}",
                       font=T.font(8), fill=T.TEXT_DIM)
+        # Urgency badge: a red count means overdue, amber means due today.
+        badge = overdue or due_today
+        if badge:
+            cx, cy, r = PILL_SIZE - 15, 15, 9
+            fill = T.DANGER if overdue else T.WARN
+            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill,
+                          outline=T.CARD, width=2)
+            c.create_text(cx, cy, text="9+" if badge > 9 else str(badge),
+                          font=T.font(7, True), fill=T.ON_ACCENT)
 
     def update_progress(self, stats: dict):
         self._draw(stats.get("overall", 0), stats.get("total", 0),
-                   stats.get("done", 0))
+                   stats.get("done", 0), stats.get("overdue", 0),
+                   stats.get("due_today", 0))
 
     def move_to(self, x: int, y: int):
         self.root.geometry(f"+{x}+{y}")

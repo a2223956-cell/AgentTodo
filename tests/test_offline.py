@@ -80,10 +80,10 @@ class TestStore(unittest.TestCase):
         # setting a mid value on a binary task promotes it to percentage tracking
         self.store.set_progress(a.id, 50)
         self.assertEqual(self.store.get(a.id).mode, "pct")
-        # switching back to check snaps the value to 0/100
+        # switching back to check keeps the value (no silent data loss)
         self.store.set_mode(a.id, "check")
         self.assertEqual(self.store.get(a.id).mode, "check")
-        self.assertEqual(self.store.get(a.id).progress, 100)
+        self.assertEqual(self.store.get(a.id).progress, 50)
         # editing other fields must not lose the mode
         self.store.update(c.id, title="提交ROVSEA报价单")
         self.assertEqual(self.store.get(c.id).mode, "pct")
@@ -92,6 +92,39 @@ class TestStore(unittest.TestCase):
         # unknown mode string falls back to the progress-based inference
         self.assertEqual(normalize_task({"title": "x", "mode": "???"})["mode"], "check")
         self.assertEqual(normalize_task({"title": "x", "mode": "百分比"})["mode"], "pct")
+
+
+    def test_due_parsing_and_ordered_list(self):
+        from datetime import date, timedelta
+        today = date.today()
+        past = (today - timedelta(days=2)).isoformat()
+        soon = (today + timedelta(days=5)).isoformat()
+        overdue = self.store.add({"title": "逾期", "due": past})
+        due_now = self.store.add({"title": "今天到期", "due": "今天"})
+        later = self.store.add({"title": "以后", "due": soon})
+        undated = self.store.add({"title": "无截止"})
+        done = self.store.add({"title": "已完成", "progress": 100, "due": past})
+
+        order = [t.id for t in self.store.ordered(today=today)]
+        self.assertEqual(order, [overdue.id, due_now.id, later.id,
+                                 undated.id, done.id])
+        # raw text preserved, parsed date alongside it
+        self.assertEqual(self.store.get(overdue.id).due, past)
+        self.assertEqual(self.store.get(overdue.id).due_at, past)
+        self.assertEqual(self.store.get(due_now.id).due, "今天")
+        self.assertEqual(self.store.get(due_now.id).due_at, today.isoformat())
+        self.assertEqual(self.store.get(undated.id).due_at, "")
+
+        stats = self.store.stats()
+        self.assertEqual((stats["overdue"], stats["due_today"]), (1, 1))
+
+        # editing another field keeps the parsed date …
+        self.store.update(later.id, priority="high")
+        self.assertEqual(self.store.get(later.id).due_at, soon)
+        # … editing the due text re-derives it
+        self.store.update(later.id, due="明天")
+        self.assertEqual(self.store.get(later.id).due_at,
+                         (today + timedelta(days=1)).isoformat())
 
 
 class TestJsonExtraction(unittest.TestCase):

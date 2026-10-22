@@ -9,6 +9,8 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 
+from .dates import URGENCY_RANK, parse_due, urgency
+
 VALID_PRIORITY = ("high", "med", "low")
 
 # Per-task display mode:
@@ -40,7 +42,8 @@ class Task:
     title: str
     detail: str = ""
     source: str = ""
-    due: str = ""
+    due: str = ""          # 原文, e.g. "明天发货（2026-10-22）"
+    due_at: str = ""       # 解析后的 ISO 日期, "" = 解析不出
     customer: str = ""
     order_date: str = ""
     amount: str = ""
@@ -95,11 +98,19 @@ def normalize_task(raw: dict) -> dict:
     order_date = str(raw.get("order_date") or raw.get("orderdate")
                      or raw.get("order_date_text") or "").strip()[:40]
     amount = str(raw.get("amount") or raw.get("total") or "").strip()[:40]
+    # Keep the original wording for display, and a parsed ISO date for sorting
+    # and reminders. An unparseable due stays text-only — never a failed write.
+    due = str(raw.get("due") or "").strip()[:40]
+    due_at = str(raw.get("due_at") or "").strip()[:10]
+    if not due_at:
+        parsed = parse_due(due)
+        due_at = parsed.isoformat() if parsed else ""
     return {
         "title": title,
         "detail": detail[:500],
         "source": str(raw.get("source") or "")[:120],
-        "due": str(raw.get("due") or "").strip()[:40],
+        "due": due,
+        "due_at": due_at,
         "customer": customer,
         "order_date": order_date,
         "amount": amount,
@@ -113,19 +124,21 @@ class TodoStore:
     def __init__(self, path: str):
         self.path = path
         self.tasks: list[Task] = []
-        self.load()
+        if self.load():
+            self._snapshot()
 
     # ---------- persistence ----------
-    def load(self) -> None:
+    def load(self) -> bool:
+        """Read the file. False = it existed but was unreadable (backed up)."""
         self.tasks = []
         if not os.path.exists(self.path):
-            return
+            return True
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
             self._backup_corrupt()
-            return
+            return False
         for raw in data if isinstance(data, list) else data.get("tasks", []):
             try:
                 norm = normalize_task(raw)
@@ -137,6 +150,7 @@ class TodoStore:
                 ))
             except (TypeError, ValueError):
                 continue
+        return True
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -149,6 +163,27 @@ class TodoStore:
         """Keep the unreadable file: the next save() would otherwise destroy it."""
         try:
             shutil.copy2(self.path, self.path + ".bak")
+        except OSError:
+            pass
+
+    def _snapshot(self) -> None:
+        """One dated copy per day, newest 7 kept.
+
+        ``.bak`` is a single overwritten slot, so it can only ever answer "what
+        did the last corrupt file look like" — this is the actual history.
+        """
+        try:
+            if not os.path.exists(self.path):
+                return
+            bdir = os.path.join(os.path.dirname(self.path) or ".", "backups")
+            os.makedirs(bdir, exist_ok=True)
+            dest = os.path.join(bdir, f"todos-{time.strftime('%Y%m%d')}.json")
+            if not os.path.exists(dest):
+                shutil.copy2(self.path, dest)
+            names = sorted(n for n in os.listdir(bdir)
+                           if n.startswith("todos-") and n.endswith(".json"))
+            for stale in names[:-7]:
+                os.remove(os.path.join(bdir, stale))
         except OSError:
             pass
 
@@ -173,13 +208,17 @@ class TodoStore:
         task = self.get(task_id)
         if not task:
             return None
-        norm = normalize_task({**{"title": task.title, "detail": task.detail,
-                                  "source": task.source, "due": task.due,
-                                  "customer": task.customer,
-                                  "order_date": task.order_date,
-                                  "amount": task.amount,
-                                  "priority": task.priority, "mode": task.mode,
-                                  "progress": task.progress}, **fields})
+        current = {"title": task.title, "detail": task.detail,
+                   "source": task.source, "due": task.due, "due_at": task.due_at,
+                   "customer": task.customer, "order_date": task.order_date,
+                   "amount": task.amount, "priority": task.priority,
+                   "mode": task.mode, "progress": task.progress}
+        current.update(fields)
+        if "due" in fields:
+            # Re-derive the parsed date from the NEW text instead of keeping
+            # the stale one that travelled along in `current`.
+            current.pop("due_at", None)
+        norm = normalize_task(current)
         for k, v in norm.items():
             setattr(task, k, v)
         task.updated_at = time.time()
@@ -206,17 +245,14 @@ class TodoStore:
     def set_mode(self, task_id: str, mode: str) -> Task | None:
         """Switch a task between binary (check) and percentage (pct) tracking.
 
-        Switching to "check" snaps the stored value to 0/100 so the ball's
-        overall ring stays truthful.
+        The stored value is never rewritten: snapping a 49% goal to 0/100 on a
+        mode switch was silent data loss.  Mode only decides how the row is
+        drawn and which control edits it.
         """
         task = self.get(task_id)
         if not task:
             return None
-        m = _norm_mode(mode) or "check"
-        fields: dict = {"mode": m}
-        if m == "check":
-            fields["progress"] = 100 if task.progress >= 50 else 0
-        return self.update(task_id, **fields)
+        return self.update(task_id, mode=_norm_mode(mode) or "check")
 
     def toggle_done(self, task_id: str) -> Task | None:
         task = self.get(task_id)
@@ -242,6 +278,24 @@ class TodoStore:
     def all(self) -> list[Task]:
         return list(self.tasks)
 
+    def ordered(self, today=None) -> list[Task]:
+        """Display order: active first, then urgency → due date → priority → age.
+
+        Overdue and due-today rows float to the top because they are the only
+        ones that carry a consequence today; undated rows fall back to
+        priority, then insertion order (stable, so the list doesn't shuffle).
+        """
+        prio = {"high": 0, "med": 1, "low": 2}
+
+        def key(t: Task):
+            return (t.done,
+                    URGENCY_RANK.get(urgency(t.due_at, today), 4),
+                    t.due_at or "9999-12-31",
+                    prio.get(t.priority, 1),
+                    t.created_at)
+
+        return sorted(self.tasks, key=key)
+
     def find_by_title(self, title: str) -> Task | None:
         key = title.strip().lower()
         for t in self.tasks:
@@ -252,14 +306,18 @@ class TodoStore:
     def stats(self) -> dict:
         total = len(self.tasks)
         done = sum(1 for t in self.tasks if t.done)
+        in_progress = sum(1 for t in self.tasks if 0 < t.progress < 100)
         if total:
             overall = round(sum(t.progress for t in self.tasks) / total)
         else:
             overall = 0
+        open_buckets = [urgency(t.due_at) for t in self.tasks if not t.done]
         return {
             "total": total,
             "done": done,
-            "in_progress": sum(1 for t in self.tasks if 0 < t.progress < 100),
-            "pending": total - done - sum(1 for t in self.tasks if 0 < t.progress < 100),
+            "in_progress": in_progress,
+            "pending": total - done - in_progress,
             "overall": overall,
+            "overdue": open_buckets.count("overdue"),
+            "due_today": open_buckets.count("today"),
         }
