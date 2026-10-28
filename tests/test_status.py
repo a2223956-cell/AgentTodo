@@ -77,7 +77,7 @@ class TestAppPayload(unittest.TestCase):
             _last_note="已添加 2 条任务", _last_error="")
         payload = App._status_payload(fake)  # type: ignore[arg-type]
         for key in ("running", "pid", "app_dir", "analyzing", "queue", "total",
-                    "done", "overall", "overdue", "due_today", "ai",
+                    "done", "done_today", "overall", "overdue", "due_today", "ai",
                     "last_note", "last_error"):
             self.assertIn(key, payload)
         self.assertTrue(payload["running"])

@@ -8,10 +8,17 @@ import shutil
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import date
 
 from .dates import URGENCY_RANK, parse_due, urgency
 
 VALID_PRIORITY = ("high", "med", "low")
+
+# Completed tasks leave todos.json and land here instead — the list shows what
+# is still open, the archive keeps the history (and feeds undo + the "今日完成"
+# counter).  Kept next to todos.json, so a --data-dir keeps its own history.
+ARCHIVE_NAME = "completed.json"
+ARCHIVE_KEEP = 5000
 
 # Per-task display mode:
 #   "check" — binary: 只需展示/切换 完成·未完成(不出现百分比)
@@ -121,9 +128,13 @@ def normalize_task(raw: dict) -> dict:
 
 
 class TodoStore:
-    def __init__(self, path: str):
+    def __init__(self, path: str, archive_path: str | None = None):
         self.path = path
+        self.archive_path = archive_path or os.path.join(
+            os.path.dirname(path) or ".", ARCHIVE_NAME)
         self.tasks: list[Task] = []
+        self.archive: list[dict] = []
+        self._load_archive()
         if self.load():
             self._snapshot()
 
@@ -186,6 +197,96 @@ class TodoStore:
                 os.remove(os.path.join(bdir, stale))
         except OSError:
             pass
+
+    # ---------- archive (completed tasks) ----------
+    def _load_archive(self) -> None:
+        try:
+            with open(self.archive_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            self.archive = []
+            return
+        if isinstance(data, dict):
+            data = data.get("tasks", [])
+        self.archive = [r for r in (data if isinstance(data, list) else [])
+                        if isinstance(r, dict)][-ARCHIVE_KEEP:]
+
+    def save_archive(self) -> None:
+        """Only happens on completion/undo — never on a heartbeat."""
+        try:
+            os.makedirs(os.path.dirname(self.archive_path) or ".", exist_ok=True)
+            tmp = self.archive_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.archive, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.archive_path)
+        except OSError:
+            pass
+
+    def archive_tasks(self, tasks: list[Task], prev_progress: dict | None = None,
+                      completed_at=None) -> list[dict]:
+        """Move tasks out of the live list and into completed.json.
+
+        ``completed_at`` may be one timestamp or a per-task-id mapping (legacy
+        tasks were completed on the day they were last edited).  ``prev_progress``
+        is remembered so undo can put the task back where it was.
+        """
+        prev_progress = prev_progress or {}
+        records = []
+        for t in tasks:
+            when = (completed_at.get(t.id, t.updated_at)
+                    if isinstance(completed_at, dict)
+                    else (t.updated_at if completed_at is None else completed_at))
+            rec = asdict(t)
+            rec["completed_at"] = float(when or time.time())
+            rec["prev_progress"] = int(prev_progress.get(t.id, 0))
+            records.append(rec)
+        if not records:
+            return records
+        ids = {r["id"] for r in records}
+        self.tasks = [t for t in self.tasks if t.id not in ids]
+        self.archive.extend(records)
+        self.archive = self.archive[-ARCHIVE_KEEP:]
+        self.save()
+        self.save_archive()
+        return records
+
+    def pop_archive(self) -> dict | None:
+        """Undo: take the newest completion record off the archive."""
+        if not self.archive:
+            return None
+        rec = self.archive.pop()
+        self.save_archive()
+        return rec
+
+    def restore(self, rec: dict) -> Task:
+        """Re-add an archived record as an open task (undo)."""
+        data = {k: rec.get(k) for k in (
+            "title", "detail", "source", "due", "due_at", "customer",
+            "order_date", "amount", "priority", "mode")}
+        norm = normalize_task(data)
+        norm["progress"] = _clamp_progress(rec.get("prev_progress", 0))
+        task = Task(
+            id=str(rec.get("id") or uuid.uuid4().hex[:8]),
+            created_at=float(rec.get("created_at") or time.time()),
+            updated_at=time.time(),
+            **norm,
+        )
+        self.tasks.append(task)
+        self.save()
+        return task
+
+    def completed_today(self, day: date | None = None) -> int:
+        """How many tasks were completed on ``day`` (local time), archive only."""
+        want = (day or date.today()).isoformat()
+        n = 0
+        for rec in self.archive:
+            try:
+                got = date.fromtimestamp(float(rec.get("completed_at") or 0)).isoformat()
+            except (TypeError, ValueError, OSError):
+                continue
+            if got == want:
+                n += 1
+        return n
 
     # ---------- mutations ----------
     def add(self, raw: dict) -> Task:
@@ -315,6 +416,7 @@ class TodoStore:
         return {
             "total": total,
             "done": done,
+            "done_today": self.completed_today(),
             "in_progress": in_progress,
             "pending": total - done - in_progress,
             "overall": overall,

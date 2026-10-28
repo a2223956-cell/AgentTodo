@@ -290,6 +290,15 @@ class Dashboard(tk.Toplevel):
         tk.Label(head, text="agent 悬浮待办", font=T.font(8), fg=T.TEXT_DIM,
                  bg=T.CARD).pack(side="left", padx=(8, 0))
 
+        self._obsidian_on = True
+        self.obsidian_btn = tk.Label(head, text="✎ 笔记", font=T.font(8),
+                                     fg=T.OK, bg=T.CARD, cursor="hand2", padx=4)
+        self.obsidian_btn.pack(side="left", padx=(10, 0))
+        self.obsidian_btn.bind("<Button-1>", lambda e: self._toggle_obsidian())
+        Tooltip(self.obsidian_btn,
+                "完成的任务自动移出列表,并写入当天 Obsidian 每日笔记的「今日完成」;"
+                "点击开关")
+
         self.pin_btn = tk.Label(head, text="◎", font=T.font(11), fg=T.TEXT_SUB,
                                 bg=T.CARD, cursor="hand2", padx=6)
         self.pin_btn.pack(side="right")
@@ -461,8 +470,17 @@ class Dashboard(tk.Toplevel):
 
         self._row_order = [t.id for t in active + done]
         self._draw_overall(self._stats)
-        self.stats_label.configure(
-            text=f"{self._stats.get('done', 0)}/{self._stats.get('total', 0)} 完成")
+        total = int(self._stats.get("total", 0) or 0)
+        done_today = int(self._stats.get("done_today", 0) or 0)
+        if done_today:
+            # Completed rows leave the list, so "done/total" would only ever
+            # read 0/N — today's archive count is the number that means something.
+            text = f"{total} 待办 · 今日完成 {done_today}"
+        elif total:
+            text = f"{self._stats.get('done', 0)}/{total} 完成"
+        else:
+            text = "0 待办"
+        self.stats_label.configure(text=text)
 
     def _sync_done_header(self, n_done: int):
         if n_done == 0:
@@ -526,6 +544,17 @@ class Dashboard(tk.Toplevel):
 
     def set_agent_enabled(self, on: bool):
         self.agent_var.set(on)
+
+    def set_obsidian_enabled(self, on: bool):
+        self._obsidian_on = bool(on)
+        self.obsidian_btn.configure(
+            fg=T.OK if on else T.TEXT_DIM,
+            text="✎ 笔记" if on else "✎ 笔记 关")
+
+    def _toggle_obsidian(self):
+        fn = self.cb.get("obsidian_toggle")
+        if fn is not None:
+            fn(not self._obsidian_on)
 
     def show_at(self, x: int, y: int):
         self.geometry(f"+{x}+{y}")
@@ -629,17 +658,29 @@ class PillWindow:
         else:
             self.cb["click"]()
 
-    def _on_menu(self, event):
+    def _build_menu(self):
         menu = tk.Menu(self.root, tearoff=0, bg=T.CARD_ALT, fg=T.TEXT,
                        activebackground=T.ACCENT_SOFT, activeforeground=T.TEXT,
                        font=T.font(9), relief="flat", bd=0)
         menu.add_command(label="显示 / 隐藏面板", command=self.cb["click"])
         menu.add_command(label="固定面板", command=self.cb["pin"])
         menu.add_separator()
+        menu.add_command(label="撤销最近完成(恢复任务)",
+                         command=self.cb.get("undo_done"))
+        on = bool(self.cb.get("obsidian_on") and self.cb["obsidian_on"]())
+        toggle = self.cb.get("obsidian_toggle")
+        cmd = (lambda: toggle(not on)) if toggle is not None else (lambda: None)
+        menu.add_command(
+            label=("☑ " if on else "☐ ") + "记入 Obsidian 每日笔记", command=cmd)
+        menu.add_separator()
         menu.add_command(label="清空已完成任务", command=self.cb["clear_done"])
         menu.add_command(label="重置悬浮球位置", command=self.cb["reset_position"])
         menu.add_separator()
         menu.add_command(label="退出", command=self.cb["quit"])
+        return menu
+
+    def _on_menu(self, event):
+        menu = self._build_menu()
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:

@@ -15,7 +15,9 @@ AgentTodo 是一个 Windows 桌面悬浮窗小工具:拖一张截图、一份文
 - **拖入即分析**:图片(AI 直接"看图")、.txt / .md / .csv / .json / 代码(自动识别 GBK/UTF-8/UTF-16)、.docx(抽取正文)、pdf / xls 等二进制文件都能丢进去。
 - **两种添加方式**:「AI 分析」/ 回车走 agent 提取任务(含标题、说明、截止时间、优先级);「+」按行快速手动添加,不走 AI。
 - **进度跟踪**:勾选完成、点击进度条 +25%(右键 -25%)、删除;悬浮球与面板顶部实时汇总。
-- **截止日期可计算**:`due` 原文照旧显示(如「明天发货(2026-10-22)」),同时解析成日期,用于排序、逾期计数与提醒;列表按 逾期 → 今天 → 近期 → 截止日 → 优先级 排序,已完成折叠成一行。
+- **完成即归档**:任务一到 100% 就自动移出待办列表,写入 `completed.json`(含完成时间、原进度),面板顶部显示「今日完成 n」;误点可用右键「撤销最近完成」恢复,并同步撤回笔记里那一行。
+- **记入 Obsidian(可选)**:完成的任务按完成日期写入当天笔记的 `## ✅ 今日完成` 段落,格式 `- [x] HH:MM 标题 — 客户 · 截止 · 来源`;面板标题栏「✎ 笔记」或右键菜单一键开关,同一天同一行不会重复写。
+- **截止日期可计算**:`due` 原文照旧显示(如「明天发货(2026-10-22)」),同时解析成日期,用于排序、逾期计数与提醒;列表按 逾期 → 今天 → 近期 → 截止日 → 优先级 排序。
 - **AI 可降级**:通过 `hermes chat` 复用你已配置的模型;AI 不可用或手动关闭时自动退回内置规则解析(离线可用)。
 - **持久化**:任务与悬浮球位置保存在 `%LOCALAPPDATA%\AgentTodoFloat\`,重启不丢。
 - **状态心跳**:每次变更 + 每 5 秒写 `status.json`(总进度 / 逾期数 / 是否在分析),桌面开关等外部程序读一个文件即可,不再扫描进程。
@@ -46,8 +48,8 @@ rem 开机自启(可选):
 3. 拖入文件/图片到「拖入 图片 / 文件 到这里」区域,或在输入框输入文字:
    - 「AI 分析」/ 回车 → agent 分析生成任务(每条含标题、截止时间、优先级);
    - 「+」→ 不走 AI,按行直接添加。
-4. 任务行:点击圆圈切换完成;点击进度条 +25%,右键 -25%;「✕」删除;完成的任务移入底部「已完成 n 条」,点击展开/收起。
-5. 右键悬浮球:显示/隐藏面板、固定面板、清空已完成、重置位置、退出。
+4. 任务行:点击圆圈切换完成;点击进度条 +25%,右键 -25%;「✕」删除;完成任务会**自动移出列表**(归档到 `completed.json`),误点可在悬浮球右键「撤销最近完成」恢复。
+5. 悬浮球右键:显示/隐藏面板、固定面板、撤销最近完成、记入 Obsidian 每日笔记(勾选)、清空已完成、重置位置、退出。
 6. 界面上每个按钮(悬浮球、勾选圈、进度条、✕、「AI 分析」、「+」、◎ 等)鼠标悬停都会显示功能提示。
 
 ## AI 分析说明
@@ -61,11 +63,34 @@ rem 开机自启(可选):
 | 位置 | 内容 |
 |---|---|
 | `%LOCALAPPDATA%\AgentTodoFloat\todos.json` | 任务清单(含进度与解析后的 `due_at`;损坏时自动备份为 .bak) |
+| `%LOCALAPPDATA%\AgentTodoFloat\completed.json` | 已完成任务归档(完成时间 / 原进度 / 笔记行),最近 5000 条 |
 | `%LOCALAPPDATA%\AgentTodoFloat\status.json` | 状态心跳:总进度 / 逾期数 / 是否在分析(供桌面开关等外部程序读取) |
 | `%LOCALAPPDATA%\AgentTodoFloat\app.log` | 滚动日志(1 MB × 3):启动、分析耗时与结果、异常 |
 | `%LOCALAPPDATA%\AgentTodoFloat\backups\` | 每日 todos 快照,保留最近 7 份 |
-| `%LOCALAPPDATA%\AgentTodoFloat\config.json` | 悬浮球位置、AI 开关、面板固定状态 |
+| `%LOCALAPPDATA%\AgentTodoFloat\config.json` | 悬浮球位置、AI 开关、面板固定状态、归档 / Obsidian 设置 |
 | `%LOCALAPPDATA%\AgentTodoFloat\lock.pid` | 单实例锁(退出时自动清理) |
+
+### 完成归档与 Obsidian 每日笔记
+
+任务勾选完成(或百分比到 100%)后立即从 `todos.json` 移到 `completed.json` —— 列表只表示"还没做完的事"。归档记录带 `completed_at` 与 `prev_progress`,所以「撤销最近完成」能原样放回,`status.json` 也会多出 `done_today`。
+
+`config.json` 新增字段(缺省即下面的值):
+
+```json
+{
+  "archive_done": true,
+  "obsidian_enabled": true,
+  "obsidian_vault": "E:\\Harry 知识库\\Harry 知识库",
+  "obsidian_daily_dir": "Daily Notes",
+  "obsidian_section": "✅ 今日完成"
+}
+```
+
+- `archive_done=false` 回到旧行为:完成任务留在列表底部「已完成 n 条」。
+- `obsidian_enabled=false`(或点面板标题栏「✎ 笔记」):只归档,不写笔记。
+- 笔记不存在时按 `# YYYY-MM-DD (周X)` 新建;已有笔记只在「今日完成」段落里插入一行,保留其余内容与换行符,原子写回。
+- vault 路径不对时状态栏提示「笔记未写入(检查 vault)」,归档照常进行。
+- 同一天同一行不会重复写入;撤销完成会删掉笔记里对应那一行。
 
 ## 命令行
 
@@ -85,7 +110,7 @@ python main.py --data-dir <dir>   指定数据目录(测试用)
 .venv\Scripts\python -m unittest tests.test_offline -v
 ```
 
-覆盖:任务存储/持久化/进度统计、JSON 提取(代码块/带噪声)、规则解析(中英文、截止时间、优先级)、文件内容抽取(GBK/UTF-8/docx/二进制识别)、agent 命令构造与降级。
+覆盖:任务存储/持久化/进度统计、完成归档与撤销、Obsidian 每日笔记写入(段落定位/去重/CRLF/原子写)、JSON 提取(代码块/带噪声)、规则解析(中英文、截止时间、优先级)、文件内容抽取(GBK/UTF-8/docx/二进制识别)、agent 命令构造与降级。
 
 ## 目录结构
 
@@ -98,10 +123,12 @@ agent-todo-float/
     ui.py            悬浮球 + dashboard + 任务行(tkinter/tkdnd)
     analyzer.py      agent 分析(hermes chat)+ 规则降级 + JSON 解析
     content.py       拖入内容的文本抽取(txt/docx/图片/二进制)
-    store.py         任务模型 + JSON 存储 + 进度统计
+    store.py         任务模型 + JSON 存储 + 进度统计 + 完成归档
+    notes.py         完成记录写入 Obsidian 每日笔记(段落定位 / 去重 / 原子写)
     theme.py         配色与圆角绘制
     const.py         路径与常量
   tests/test_offline.py
+  tests/test_archive.py    完成归档 / 撤销 / 每日笔记 / 端到端
 ```
 
 ## 卸载

@@ -15,19 +15,23 @@ from app.store import Task  # noqa: E402
 from app.ui import Dashboard  # noqa: E402
 
 CB_NAMES = ("hover_panel", "pin", "hide", "pin_keep", "submit", "drop", "toggle",
-            "progress", "mode", "delete", "agent_toggle")
+            "progress", "mode", "delete", "agent_toggle", "obsidian_toggle",
+            "undo_done")
 
 
-def _cb(stats=None):
-    cb = {name: (lambda *a, **k: None) for name in CB_NAMES}
+def _cb(stats=None, obsidian_on=True, seen=None) -> dict:
+    cb: dict = {name: (lambda *a, **k: None) for name in CB_NAMES}
     cb["stats"] = stats or (lambda: {"total": 0, "done": 0, "overall": 0})
+    cb["obsidian_on"] = lambda: obsidian_on
+    if seen is not None:
+        cb["obsidian_toggle"] = lambda on: seen.append(on)
     return cb
 
 
 def _stats(tasks):
     total = len(tasks)
     done = sum(1 for t in tasks if t.progress >= 100)
-    return {"total": total, "done": done,
+    return {"total": total, "done": done, "done_today": 0,
             "overall": round(sum(t.progress for t in tasks) / total) if total else 0,
             "overdue": 0, "due_today": 0}
 
@@ -138,6 +142,24 @@ class TestIncrementalList(unittest.TestCase):
         elapsed_ms = (time.perf_counter() - start) * 1000
         # a full rebuild of 40 rows measured 700 ms; reuse must be far below
         self.assertLess(elapsed_ms, 60, f"refresh took {elapsed_ms:.0f} ms")
+
+    def test_obsidian_badge_reflects_state_and_toggles(self):
+        seen: list = []
+        dash = Dashboard(self.root, _cb(obsidian_on=True, seen=seen))
+        try:
+            self.assertEqual(dash.obsidian_btn.cget("text"), "✎ 笔记")
+            dash.set_obsidian_enabled(False)
+            self.assertIn("关", dash.obsidian_btn.cget("text"))
+            dash._toggle_obsidian()          # state is off → asks for ON
+            self.assertEqual(seen, [True])
+        finally:
+            dash.destroy()
+
+    def test_stats_label_reports_today_archived(self):
+        tasks = [_task(1), _task(2)]
+        stats = dict(_stats(tasks), done_today=3)
+        self.dash.refresh(tasks, stats)
+        self.assertEqual(self.dash.stats_label.cget("text"), "2 待办 · 今日完成 3")
 
 
 if __name__ == "__main__":

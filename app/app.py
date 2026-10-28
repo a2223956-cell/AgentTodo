@@ -7,13 +7,25 @@ import queue
 import threading
 import time
 import tkinter as tk
+from datetime import date
 
-from . import const, logsetup, status
+from . import const, logsetup, notes, status
 from .analyzer import Analyzer, AgentAnalyzer
 from .content import DropContent, build_drop
 from .screen import clamp_xy, virtual_screen
 from .store import Task, TodoStore
 from .ui import DASH_H, DASH_W, PILL_SIZE, Dashboard, PillWindow
+
+# Defaults for every key the app reads.  Merging them means an older
+# config.json keeps working and new keys never read as None.
+DEFAULT_CONFIG = {
+    "agent_enabled": True,
+    "archive_done": True,              # completed → out of the list, into the archive
+    "obsidian_enabled": True,          # …and into the day's note (optional)
+    "obsidian_vault": notes.DEFAULT_VAULT,
+    "obsidian_daily_dir": notes.DEFAULT_DAILY_DIR,
+    "obsidian_section": notes.DEFAULT_SECTION,
+}
 
 
 class App:
@@ -24,9 +36,17 @@ class App:
         self.store = TodoStore(const.store_path(self.dir))
         self._last_note = ""
         self._last_error = ""
-        self.config = self._load_config()
+        self._last_notes_written = 0
+        self.config = {**DEFAULT_CONFIG, **self._load_config()}
+        if smoke:
+            # A self-test must never write into the user's real vault.
+            self.config["obsidian_enabled"] = False
         if agent_enabled is not None:
             self.config["agent_enabled"] = agent_enabled
+        self.notes = notes.DailyNotes(
+            vault=str(self.config.get("obsidian_vault") or ""),
+            daily_dir=str(self.config.get("obsidian_daily_dir") or ""),
+            section=str(self.config.get("obsidian_section") or notes.DEFAULT_SECTION))
         self.analyzer = Analyzer(
             agent_enabled=bool(self.config.get("agent_enabled", True)),
             agent=AgentAnalyzer())
@@ -68,12 +88,16 @@ class App:
             "mode": self.set_mode,
             "delete": self.delete_task,
             "agent_toggle": self.set_agent_enabled,
+            "obsidian_toggle": self.set_obsidian_enabled,
+            "obsidian_on": self._notes_on,
+            "undo_done": self.undo_done,
             "stats": self.store.stats,
         }
         self.pill = PillWindow(self.root, cbs)
         self.dashboard = Dashboard(self.root, cbs)
         self.dashboard.set_pinned(self._pinned)
         self.dashboard.set_agent_enabled(bool(self.config.get("agent_enabled", True)))
+        self.dashboard.set_obsidian_enabled(self._notes_on())
 
         x, y = self.config.get("pos") or self._default_pos()
         # 保存的位置可能指向一块已经被拔掉的显示器。启动时按当前屏幕布局夹一次:
@@ -86,6 +110,12 @@ class App:
         if (cx, cy) != (int(x), int(y)):
             self._save_config()
         self.refresh()
+        migrated, written = self._migrate_done()
+        if migrated:
+            self.refresh()
+            self.dashboard.set_status(
+                f"已归档 {migrated} 条历史完成任务"
+                + (" · 已写入每日笔记" if written else ""))
         self.root.after(120, self._poll)
         if smoke:
             self.root.after(300, lambda: self.smoke_demo())
@@ -94,9 +124,10 @@ class App:
     def _load_config(self) -> dict:
         try:
             with open(const.config_path(self.dir), "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except (OSError, ValueError):
             return {}
+        return data if isinstance(data, dict) else {}
 
     def _save_config(self):
         live = None
@@ -117,6 +148,89 @@ class App:
         except OSError:
             pass
 
+    # ------------------------------------------------------------- completed
+    def _notes_on(self) -> bool:
+        return bool(self.config.get("obsidian_enabled", True)) and self.notes.available()
+
+    def _migrate_done(self) -> tuple[int, int]:
+        """Move tasks already sitting at 100% out of the legacy list.
+
+        Notes are written only for tasks completed TODAY: re-dating an old
+        completion into a daily note would be a lie, and past notes are the
+        user's own record.
+        """
+        if not self.config.get("archive_done", True):
+            return 0, 0
+        done = [t for t in self.store.all() if t.done]
+        if not done:
+            return 0, 0
+        recs = self.store.archive_tasks(
+            done, completed_at={t.id: t.updated_at for t in done})
+        written = self._log_records(recs, today_only=True)
+        self.log.info("migrated %d completed task(s) -> archive, notes=%d",
+                      len(recs), written)
+        return len(recs), written
+
+    def _log_records(self, recs: list[dict], today_only: bool = False) -> int:
+        """Write completions into the day's Obsidian note (best effort)."""
+        if not recs or not self.config.get("obsidian_enabled", True):
+            return 0
+        if not self.notes.available():
+            self.log.warning("obsidian skipped: vault missing (%s)", self.notes.vault)
+            return 0
+        today = date.today()
+        written = 0
+        for rec in recs:
+            if rec.get("note_path"):
+                continue          # already logged (restart / migration rerun)
+            when = float(rec.get("completed_at") or time.time())
+            try:
+                day = date.fromtimestamp(when)
+            except (OSError, ValueError):
+                day, when = today, time.time()
+            if today_only and day != today:
+                continue
+            out = self.notes.log(str(rec.get("title") or ""), when,
+                                 str(rec.get("customer") or ""),
+                                 str(rec.get("due") or ""),
+                                 str(rec.get("source") or ""))
+            if out.get("ok"):
+                rec["note_path"] = str(out.get("path") or "")
+                rec["note_line"] = str(out.get("line") or "")
+                written += 1
+            else:
+                self.log.warning("obsidian write failed for %r: %s",
+                                 rec.get("title"), out.get("error"))
+        if written:
+            self.store.save_archive()
+        return written
+
+    def _flush_done(self, prev: dict | None = None) -> tuple[int, int]:
+        """Archive every task sitting at 100% — undo history + daily note."""
+        self._last_notes_written = 0
+        if not self.config.get("archive_done", True):
+            return 0, 0
+        done = [t for t in self.store.all() if t.done]
+        if not done:
+            return 0, 0
+        recs = self.store.archive_tasks(
+            done, prev_progress=prev or {},
+            completed_at={t.id: time.time() for t in done})
+        written = self._log_records(recs)
+        self._last_notes_written = written
+        self.log.info("archived %d completed task(s), notes=%d", len(recs), written)
+        return len(recs), written
+
+    def _done_message(self, title: str, written: int) -> str:
+        msg = f"已完成「{title}」· 已移出列表"
+        if not self.config.get("obsidian_enabled", True):
+            return msg
+        if written:
+            msg += f" · 已计入 {self.notes.section}"
+        else:
+            msg += " · 笔记未写入(检查 vault)"
+        return msg
+
     # ------------------------------------------------------------- status
     def _status_payload(self, running: bool | None = None, stats: dict | None = None) -> dict:
         """The one object outside readers see (``status.json``, see status.py)."""
@@ -129,6 +243,7 @@ class App:
             "queue": len(self._pending),
             "total": s.get("total", 0),
             "done": s.get("done", 0),
+            "done_today": s.get("done_today", 0),
             "overall": s.get("overall", 0),
             "overdue": s.get("overdue", 0),
             "due_today": s.get("due_today", 0),
@@ -404,6 +519,9 @@ class App:
                 continue  # de-dupe repeats of the same drop
             self.store.add(raw)
             added += 1
+        # An agent may hand back an item that is already done; it must not sit
+        # in the list either.
+        self._flush_done()
         self.refresh()
         if not quiet:
             self.dashboard.set_status(f"已添加 {added} 条任务 · {note}" if note
@@ -411,12 +529,22 @@ class App:
         return added
 
     def toggle_task(self, task_id: str):
+        task = self.store.get(task_id)
+        prev = {task_id: task.progress} if task else {}
         self.store.toggle_done(task_id)
+        archived, written = self._flush_done(prev)
         self.refresh()
+        if archived and task is not None:
+            self.dashboard.set_status(self._done_message(task.title, written))
 
     def set_progress(self, task_id: str, progress: int):
+        task = self.store.get(task_id)
+        prev = {task_id: task.progress} if task else {}
         self.store.set_progress(task_id, progress)
+        archived, written = self._flush_done(prev)
         self.refresh()
+        if archived and task is not None:
+            self.dashboard.set_status(self._done_message(task.title, written))
 
     def set_mode(self, task_id: str, mode: str):
         """Per-task switch: 百分比进度 ↔ 完成勾选."""
@@ -432,15 +560,42 @@ class App:
         self.refresh()
 
     def clear_done(self):
-        removed = self.store.clear_done()
+        archived, written = self._flush_done({})
         self.refresh()
-        self.dashboard.set_status(f"已清理 {removed} 条完成任务")
+        self.dashboard.set_status(
+            f"已归档 {archived} 条完成任务"
+            + (" · 已计入每日笔记" if written else ""))
+
+    def undo_done(self):
+        """Put the newest archived task back on the list (and revert its note line)."""
+        rec = self.store.pop_archive()
+        if not rec:
+            self.dashboard.set_status("没有可撤销的完成记录")
+            return
+        reverted = self.notes.remove_line(str(rec.get("note_path") or ""),
+                                          str(rec.get("note_line") or ""))
+        task = self.store.restore(rec)
+        self.refresh()
+        self.dashboard.set_status(
+            f"已恢复「{task.title}」" + (" · 每日笔记已回退" if reverted else ""))
 
     def set_agent_enabled(self, on: bool):
         self.analyzer.agent_enabled = bool(on)
         self.config["agent_enabled"] = bool(on)
         self._save_config()
         self.dashboard.set_status("AI 分析已开启" if on else "AI 分析已关闭 · 使用规则解析")
+
+    def set_obsidian_enabled(self, on: bool):
+        self.config["obsidian_enabled"] = bool(on)
+        self._save_config()
+        self.dashboard.set_obsidian_enabled(self._notes_on())
+        if on and not self.notes.available():
+            self.dashboard.set_status(
+                f"已开启,但 Obsidian vault 不存在: {self.notes.vault or '(未配置)'}")
+        else:
+            self.dashboard.set_status(
+                f"完成的任务将记入 {self.notes.section}" if on
+                else "已关闭 Obsidian 每日笔记(完成记录仍归档到本地)")
 
     # ------------------------------------------------------------- render
     def refresh(self):
@@ -516,11 +671,20 @@ class App:
         self.set_progress(first.id, 75)
         self._smoke_results.append(
             ("progress update", self.store.get(first.id).progress == 75))
-        self.toggle_task(first.id)
-        self._smoke_results.append(("toggle done", self.store.get(first.id).done))
+        first_id, first_title = first.id, first.title
+        self.toggle_task(first_id)
+        self._smoke_results.append(
+            ("done task leaves the list", self.store.get(first_id) is None))
+        self._smoke_results.append(("done task is archived", any(
+            r.get("id") == first_id and r.get("title") == first_title
+            for r in self.store.archive)))
         self._smoke_results.append(("stats consistent",
                                     self.store.stats()["done"] == sum(
                                         1 for t in self.store.all() if t.done)))
+        self.undo_done()
+        restored = self.store.get(first_id)
+        self._smoke_results.append(("undo restores the task", bool(
+            restored) and not restored.done and restored.progress == 75))
 
         for name, ok in self._smoke_results:
             print(f"[smoke] {'PASS' if ok else 'FAIL'}: {name}")
