@@ -1,0 +1,4 @@
+name: agenttodo-switch
+version: 1.2.0
+description: "AgentTodo 悬浮待办开关: Hermes Desktop 状态栏一键启动/停止 E:\\AgentTodo 桌面悬浮球,显示进度、逾期/今日到期数、今日完成数(读 completed.json 归档)与分析中状态。状态读应用写入的 status.json 心跳(每 5s)+ lock.pid 存活判断,不再每轮起 PowerShell 扫进程。Dashboard 后端为 dashboard/plugin_api.py (/api/plugins/agenttodo-switch/),无 agent 工具/钩子,agent 侧惰性清单仅用于 plugins.enabled 启用门槛。"
+author: "obstian-recorder"

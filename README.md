@@ -129,6 +129,7 @@ agent-todo-float/
     const.py         路径与常量
   tests/test_offline.py
   tests/test_archive.py    完成归档 / 撤销 / 每日笔记 / 端到端
+  integrations/hermes-desktop-plugin/   Hermes 桌面状态栏开关(运行时副本,见其 README)
 ```
 
 ## 卸载
